@@ -1,6 +1,5 @@
 """24/7 Autonomous Live Alarm Scanner & Cloud Web Server for One Shot Master Setups.
-Runs 24/7 locally and on Cloud (Render/Railway/Oracle Cloud).
-Serves HTTP health check on 0.0.0.0:$PORT immediately to satisfy Render health check.
+Includes self-ping keep-alive loop to prevent Render free tier from going to sleep.
 """
 
 import os
@@ -42,6 +41,19 @@ def start_http_health_server():
     server = HTTPServer(("0.0.0.0", port), CloudHealthHandler)
     print(f"[CloudServer] HTTP Health Server running on 0.0.0.0:{port}...", flush=True)
     server.serve_forever()
+
+def keep_alive_ping_loop():
+    """Self-ping every 10 minutes to prevent Render free tier sleep."""
+    time.sleep(30)
+    url = "https://oneshot-telegram-bot.onrender.com"
+    while True:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "RenderSelfKeepAlive/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(f"[KeepAlive] Self-ping successful at {datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M:%S UTC')}", flush=True)
+        except Exception as e:
+            print(f"[KeepAlive] Self-ping note: {e}", flush=True)
+        time.sleep(600)
 
 def send_telegram(text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -155,9 +167,13 @@ def scan_symbol_timeframe(symbol: str, interval: str, sent_alerts: set):
 def run_live_scanner_loop():
     print("=== 24/7 AUTONOMOUS LIVE ALARM SCANNER STARTED (FOR THE KING) ===", flush=True)
     
-    # Start HTTP Health Server immediately in background thread
-    t = threading.Thread(target=start_http_health_server, daemon=True)
-    t.start()
+    # 1. Start HTTP Health Server immediately
+    t1 = threading.Thread(target=start_http_health_server, daemon=True)
+    t1.start()
+    
+    # 2. Start Self-Ping Keep-Alive loop to keep Render awake 24/7
+    t2 = threading.Thread(target=keep_alive_ping_loop, daemon=True)
+    t2.start()
     
     sent_alerts = load_sent_alerts()
     symbols = ["BTCUSDT", "ETHUSDT"]
