@@ -1,6 +1,6 @@
 """24/7 Autonomous Live Alarm Scanner & Cloud Web Server for One Shot Master Setups.
 Runs 24/7 locally and on Cloud (Render/Railway/Oracle Cloud).
-Serves HTTP health check on $PORT to satisfy Cloud platform keep-alive.
+Serves HTTP health check on 0.0.0.0:$PORT immediately to satisfy Render health check.
 """
 
 import os
@@ -13,26 +13,56 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List
 
-from backend.notify import send_telegram_message
-
 sys.stdout.reconfigure(line_buffering=True)
 
 BINANCE_FUTURES_URL = "https://fapi.binance.com/fapi/v1/klines"
 POLL_INTERVAL_SECONDS = 60
 SENT_ALERTS_FILE = "data/config/sent_alerts.json"
 
+TELEGRAM_BOT_TOKEN = "8616444306:AAHlu-yaXg6wLL4COHgFnGWhsbKIivilb4k"
+TELEGRAM_CHAT_ID = "1367838881"
+
 class CloudHealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "application/json")
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "healthy", "service": "OneShot Live Alarm Bot"}).encode("utf-8"))
+        self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return  # Suppress HTTP access logging
 
 def start_http_health_server():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", "10000"))
     server = HTTPServer(("0.0.0.0", port), CloudHealthHandler)
-    print(f"[CloudServer] HTTP Health Server running on port {port}...", flush=True)
+    print(f"[CloudServer] HTTP Health Server running on 0.0.0.0:{port}...", flush=True)
     server.serve_forever()
+
+def send_telegram(text: str) -> bool:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+            return res.get("ok", False)
+    except Exception as e:
+        print(f"[TelegramAlert] Error: {e}", flush=True)
+        return False
 
 def load_sent_alerts() -> set:
     if os.path.exists(SENT_ALERTS_FILE):
@@ -117,15 +147,15 @@ def scan_symbol_timeframe(symbol: str, interval: str, sent_alerts: set):
                     )
                     
                     print(f"[LiveScanner] MATCH FOUND! Sending alert for {alert_id}", flush=True)
-                    res = send_telegram_message(msg)
-                    if res.get("ok"):
+                    res = send_telegram(msg)
+                    if res:
                         sent_alerts.add(alert_id)
                         save_sent_alerts(sent_alerts)
 
 def run_live_scanner_loop():
     print("=== 24/7 AUTONOMOUS LIVE ALARM SCANNER STARTED (FOR THE KING) ===", flush=True)
     
-    # Start HTTP Health Check Server in background thread
+    # Start HTTP Health Server immediately in background thread
     t = threading.Thread(target=start_http_health_server, daemon=True)
     t.start()
     
