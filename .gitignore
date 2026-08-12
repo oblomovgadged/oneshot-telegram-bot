@@ -1,0 +1,12 @@
+# Exclude heavy 7 GB research data files from cloud repo
+data/raw/
+data/raw_1m/
+data/processed/
+data/runs/
+*.parquet
+*.csv
+*.tmp
+__pycache__/
+venv/
+.system_generated/
+scratch/
