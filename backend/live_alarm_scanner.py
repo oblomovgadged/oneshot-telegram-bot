@@ -1,5 +1,5 @@
 """24/7 Autonomous Live Alarm Scanner & Cloud Web Server for One Shot Master Setups.
-Includes self-ping keep-alive loop to prevent Render free tier from going to sleep.
+Uses Authoritative Multi-Candle Retest Touch Scan Algorithm matching get_one_shot_tp_chart.
 """
 
 import os
@@ -34,7 +34,7 @@ class CloudHealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        return  # Suppress HTTP access logging
+        return
 
 def start_http_health_server():
     port = int(os.environ.get("PORT", "10000"))
@@ -43,16 +43,15 @@ def start_http_health_server():
     server.serve_forever()
 
 def keep_alive_ping_loop():
-    """Self-ping every 10 minutes to prevent Render free tier sleep."""
     time.sleep(30)
     url = "https://oneshot-telegram-bot.onrender.com"
     while True:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "RenderSelfKeepAlive/1.0"})
             with urllib.request.urlopen(req, timeout=10) as resp:
-                print(f"[KeepAlive] Self-ping successful at {datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M:%S UTC')}", flush=True)
-        except Exception as e:
-            print(f"[KeepAlive] Self-ping note: {e}", flush=True)
+                pass
+        except Exception:
+            pass
         time.sleep(600)
 
 def send_telegram(text: str) -> bool:
@@ -100,6 +99,7 @@ def fetch_binance_klines(symbol: str, interval: str, limit: int = 50) -> List[Di
             for item in data:
                 klines.append({
                     "open_time": int(item[0]),
+                    "datetime": datetime.datetime.fromtimestamp(int(item[0])/1000, tz=datetime.timezone.utc),
                     "open": float(item[1]),
                     "high": float(item[2]),
                     "low": float(item[3]),
@@ -112,66 +112,101 @@ def fetch_binance_klines(symbol: str, interval: str, limit: int = 50) -> List[Di
         return []
 
 def scan_symbol_timeframe(symbol: str, interval: str, sent_alerts: set):
-    klines = fetch_binance_klines(symbol, interval, limit=30)
+    klines = fetch_binance_klines(symbol, interval, limit=40)
     if len(klines) < 5:
         return
         
-    mb = klines[-3]
-    ib = klines[-2]
-    latest = klines[-1]
+    n = len(klines)
+    latest = klines[-1] # Current live candle
     
-    if mb['high'] >= ib['high'] and mb['low'] <= ib['low']:
-        mb_high = mb['high']
-        mb_low = mb['low']
-        mb_close = mb['close']
-        mb_open = mb['open']
+    # Authoritative Scan: Check candidate Mother Bars in the last 20 candles
+    for i in range(max(0, n - 20), n - 2):
+        mb = klines[i]
+        ib = klines[i + 1]
         
-        range_pct = (mb_high - mb_low) / mb_close * 100.0
-        body_ratio = abs(mb_close - mb_open) / (mb_high - mb_low) if (mb_high - mb_low) > 0 else 0.5
-        
-        if range_pct <= 1.4 and body_ratio >= 0.38:
-            alert_id = f"{symbol}_{interval}_{mb['open_time']}"
+        # 1. Mother Bar Pattern Check
+        if mb['high'] >= ib['high'] and mb['low'] <= ib['low']:
+            range_pct = (mb['high'] - mb['low']) / mb['close'] * 100.0
+            body_ratio = abs(mb['close'] - mb['open']) / (mb['high'] - mb['low']) if (mb['high'] - mb['low']) > 0 else 0.5
             
-            if alert_id not in sent_alerts:
-                is_long_break = latest['high'] > mb_high
-                is_short_break = latest['low'] < mb_low
+            # Compaction Check
+            if range_pct <= 1.4 and body_ratio >= 0.38:
+                mb_high = mb['high']
+                mb_low = mb['low']
                 
-                if is_long_break or is_short_break:
-                    direction = "LONG" if is_long_break else "SHORT"
-                    entry_price = mb_high if is_long_break else mb_low
-                    stop_loss = mb_low if is_long_break else mb_high
-                    r_dist = abs(entry_price - stop_loss)
-                    take_profit = entry_price + (2.0 * r_dist) if is_long_break else entry_price - (2.0 * r_dist)
+                # Check for Breakout candle after IB
+                for j in range(i + 2, n):
+                    c = klines[j]
                     
-                    msg = (
-                        f"👑 *CANLI GÜNÜN ŞAMPİYON İŞLEM ALARMI*\n\n"
-                        f"📍 *Parite:* `{symbol}` ({interval.upper()})\n"
-                        f"🧭 *Yön:* {'🟢 LONG' if direction == 'LONG' else '🔴 SHORT'}\n"
-                        f"-----------------------------------\n"
-                        f"🔹 *Giriş (Entry):* `{entry_price:,.2f} $`\n"
-                        f"🛑 *Stop Loss:* `{stop_loss:,.2f} $` (Mesafe: %{(r_dist/entry_price)*100:.2f})\n"
-                        f"🎯 *Take Profit (+2R):* `{take_profit:,.2f} $`\n"
-                        f"-----------------------------------\n"
-                        f"🏛️ *Kurumsal Seviye:* PWO / MON_H Teması\n"
-                        f"📊 *CVD Uyumsuzluğu:* Pozitif Hacim Deltası\n"
-                        f"-----------------------------------\n"
-                        f"👑 *Saygılarımla Kralım, Canlı Piyasada Teyit Alındı!*"
-                    )
-                    
-                    print(f"[LiveScanner] MATCH FOUND! Sending alert for {alert_id}", flush=True)
-                    res = send_telegram(msg)
-                    if res:
-                        sent_alerts.add(alert_id)
-                        save_sent_alerts(sent_alerts)
+                    # LONG Breakout
+                    if c['close'] > mb_high:
+                        entry = mb_high
+                        stop = mb_low
+                        r_dist = abs(entry - stop)
+                        target = entry + (2.0 * r_dist)
+                        
+                        # Retest Touch on Current Candle
+                        if latest['low'] <= entry and latest['open_time'] >= c['open_time']:
+                            alert_id = f"{symbol}_{interval}_{mb['open_time']}_LONG"
+                            if alert_id not in sent_alerts:
+                                msg = (
+                                    f"👑 *CANLI GÜNÜN ŞAMPİYON İŞLEM ALARMI*\n\n"
+                                    f"📍 *Parite:* `{symbol}` ({interval.upper()})\n"
+                                    f"🧭 *Yön:* 🟢 LONG\n"
+                                    f"-----------------------------------\n"
+                                    f"🔹 *Giriş (Entry):* `{entry:,.2f} $`\n"
+                                    f"🛑 *Stop Loss:* `{stop:,.2f} $` (Mesafe: %{(r_dist/entry)*100:.2f})\n"
+                                    f"🎯 *Take Profit (+2R):* `{target:,.2f} $`\n"
+                                    f"-----------------------------------\n"
+                                    f"🏛️ *Kurumsal Seviye:* PWO / MON_H Teması\n"
+                                    f"📊 *CVD Uyumsuzluğu:* Pozitif Hacim Deltası\n"
+                                    f"-----------------------------------\n"
+                                    f"👑 *Saygılarımla Kralım, Canlı Retest Teması Yakalandı!*"
+                                )
+                                print(f"[LiveScanner] MATCH FOUND! Sending alert for {alert_id}", flush=True)
+                                res = send_telegram(msg)
+                                if res:
+                                    sent_alerts.add(alert_id)
+                                    save_sent_alerts(sent_alerts)
+                        break
+                        
+                    # SHORT Breakout
+                    elif c['close'] < mb_low:
+                        entry = mb_low
+                        stop = mb_high
+                        r_dist = abs(stop - entry)
+                        target = entry - (2.0 * r_dist)
+                        
+                        if latest['high'] >= entry and latest['open_time'] >= c['open_time']:
+                            alert_id = f"{symbol}_{interval}_{mb['open_time']}_SHORT"
+                            if alert_id not in sent_alerts:
+                                msg = (
+                                    f"👑 *CANLI GÜNÜN ŞAMPİYON İŞLEM ALARMI*\n\n"
+                                    f"📍 *Parite:* `{symbol}` ({interval.upper()})\n"
+                                    f"🧭 *Yön:* 🔴 SHORT\n"
+                                    f"-----------------------------------\n"
+                                    f"🔹 *Giriş (Entry):* `{entry:,.2f} $`\n"
+                                    f"🛑 *Stop Loss:* `{stop:,.2f} $` (Mesafe: %{(r_dist/entry)*100:.2f})\n"
+                                    f"🎯 *Take Profit (+2R):* `{target:,.2f} $`\n"
+                                    f"-----------------------------------\n"
+                                    f"🏛️ *Kurumsal Seviye:* PWO / MON_H Teması\n"
+                                    f"📊 *CVD Uyumsuzluğu:* Pozitif Hacim Deltası\n"
+                                    f"-----------------------------------\n"
+                                    f"👑 *Saygılarımla Kralım, Canlı Retest Teması Yakalandı!*"
+                                )
+                                print(f"[LiveScanner] MATCH FOUND! Sending alert for {alert_id}", flush=True)
+                                res = send_telegram(msg)
+                                if res:
+                                    sent_alerts.add(alert_id)
+                                    save_sent_alerts(sent_alerts)
+                        break
 
 def run_live_scanner_loop():
     print("=== 24/7 AUTONOMOUS LIVE ALARM SCANNER STARTED (FOR THE KING) ===", flush=True)
     
-    # 1. Start HTTP Health Server immediately
     t1 = threading.Thread(target=start_http_health_server, daemon=True)
     t1.start()
     
-    # 2. Start Self-Ping Keep-Alive loop to keep Render awake 24/7
     t2 = threading.Thread(target=keep_alive_ping_loop, daemon=True)
     t2.start()
     
